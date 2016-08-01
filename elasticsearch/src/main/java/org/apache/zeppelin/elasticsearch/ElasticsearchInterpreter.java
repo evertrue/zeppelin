@@ -57,6 +57,10 @@ import org.elasticsearch.search.aggregations.Aggregations;
 import org.elasticsearch.search.aggregations.InternalMultiBucketAggregation;
 import org.elasticsearch.search.aggregations.bucket.InternalSingleBucketAggregation;
 import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation;
+import org.elasticsearch.search.aggregations.bucket.histogram.InternalDateHistogram;
+import org.elasticsearch.search.aggregations.bucket.nested.InternalNested;
+import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
+import org.elasticsearch.search.aggregations.bucket.terms.Terms;
 import org.elasticsearch.search.aggregations.metrics.InternalMetricsAggregation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -445,25 +449,57 @@ public class ElasticsearchInterpreter extends Interpreter {
 
     if (agg instanceof InternalMetricsAggregation) {
       resMsg = XContentHelper.toString((InternalMetricsAggregation) agg).toString();
+    } else if (agg instanceof InternalNested) {
+      InternalNested internalNested = (InternalNested) agg;
+      return buildAggResponseMessage(internalNested.getAggregations());
     }
     else if (agg instanceof InternalSingleBucketAggregation) {
       resMsg = XContentHelper.toString((InternalSingleBucketAggregation) agg).toString();
     }
-    else if (agg instanceof InternalMultiBucketAggregation) {
+    else if (agg instanceof InternalDateHistogram) {
       final StringBuffer buffer = new StringBuffer("key\tdoc_count");
 
-      final InternalMultiBucketAggregation multiBucketAgg = (InternalMultiBucketAggregation) agg;
-      for (MultiBucketsAggregation.Bucket bucket : multiBucketAgg.getBuckets()) {
-        buffer.append("\n")
-          .append(bucket.getKeyAsString())
-          .append("\t")
-          .append(bucket.getDocCount());
+      final InternalDateHistogram internalHistogram = (InternalDateHistogram) agg;
+
+//      for (DateHistogram.Bucket b : internalHistogram.getBuckets()) {
+//        buffer.append("\n").append(b.getKey()).append("\t").append(b.getDocCount());
+//      }
+      resType = InterpreterResult.Type.TABLE;
+      resMsg = buffer.toString();
+    }
+    else if (agg instanceof StringTerms) {
+      final StringBuffer buffer = new StringBuffer("key\tdoc_count");
+      final StringTerms stringTerms = (StringTerms) agg;
+      for (Terms.Bucket b : stringTerms.getBuckets()) {
+        buffer.append("\n").append(b.getKeyAsString()).append("\t").append(b.getDocCount());
+      }
+      resType = InterpreterResult.Type.TABLE;
+      resMsg = buffer.toString();
+    } else if (agg instanceof MultiBucketsAggregation) {
+      final MultiBucketsAggregation multiBucketsAggregation = (MultiBucketsAggregation) agg;
+
+      final StringBuffer buffer = new StringBuffer("key\tdoc_count");
+      for (MultiBucketsAggregation.Bucket bucket : multiBucketsAggregation.getBuckets()) {
+        buffer.append("\n").append(bucket.getKey()).append("\t").append(bucket.getDocCount());
       }
 
       resType = InterpreterResult.Type.TABLE;
       resMsg = buffer.toString();
     }
-
+//    else if (agg instanceof InternalMultiBucketAggregation) {
+//      final StringBuffer buffer = new StringBuffer("key\tdoc_count");
+//
+//      final InternalMultiBucketAggregation multiBucketAgg = (InternalMultiBucketAggregation) agg;
+//      for (MultiBucketsAggregation.Bucket bucket : multiBucketAgg.getBuckets()) {
+//        buffer.append("\n")
+//          .append(bucket.getKeyAsString())
+//          .append("\t")
+//          .append(bucket.getDocCount());
+//      }
+//
+//      resType = InterpreterResult.Type.TABLE;
+//      resMsg = buffer.toString();
+//    }
     return new InterpreterResult(InterpreterResult.Code.SUCCESS, resType, resMsg);
   }
 
