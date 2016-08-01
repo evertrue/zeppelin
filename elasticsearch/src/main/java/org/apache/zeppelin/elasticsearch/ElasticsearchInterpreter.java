@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -28,10 +29,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import org.apache.commons.lang.StringUtils;
 import org.apache.zeppelin.interpreter.Interpreter;
 import org.apache.zeppelin.interpreter.InterpreterContext;
@@ -46,18 +50,17 @@ import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.transport.TransportClient;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.InetSocketTransportAddress;
-import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHitField;
 import org.elasticsearch.search.aggregations.Aggregation;
 import org.elasticsearch.search.aggregations.Aggregations;
-import org.elasticsearch.search.aggregations.InternalMultiBucketAggregation;
-import org.elasticsearch.search.aggregations.bucket.InternalSingleBucketAggregation;
 import org.elasticsearch.search.aggregations.bucket.MultiBucketsAggregation;
-import org.elasticsearch.search.aggregations.metrics.InternalMetricsAggregation;
+import org.elasticsearch.search.aggregations.bucket.SingleBucketAggregation;
+import org.elasticsearch.search.aggregations.metrics.NumericMetricsAggregation.SingleValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -443,29 +446,109 @@ public class ElasticsearchInterpreter extends Interpreter {
     InterpreterResult.Type resType = InterpreterResult.Type.TEXT;
     String resMsg = "";
 
-    if (agg instanceof InternalMetricsAggregation) {
-      resMsg = XContentHelper.toString((InternalMetricsAggregation) agg).toString();
-    }
-    else if (agg instanceof InternalSingleBucketAggregation) {
-      resMsg = XContentHelper.toString((InternalSingleBucketAggregation) agg).toString();
-    }
-    else if (agg instanceof InternalMultiBucketAggregation) {
-      final StringBuffer buffer = new StringBuffer("key\tdoc_count");
+    if (agg instanceof SingleBucketAggregation) {
+      return buildAggResponseMessage(((SingleBucketAggregation) agg).getAggregations());
+    } else if (agg instanceof MultiBucketsAggregation) {
+      final MultiBucketsAggregation multiBucketsAggregation = (MultiBucketsAggregation) agg;
 
-      final InternalMultiBucketAggregation multiBucketAgg = (InternalMultiBucketAggregation) agg;
-      for (MultiBucketsAggregation.Bucket bucket : multiBucketAgg.getBuckets()) {
-        buffer.append("\n")
-          .append(bucket.getKeyAsString())
-          .append("\t")
-          .append(bucket.getDocCount());
+      List<String> headers = Lists.newArrayList(agg.getName());
+      Map<String, String> rows = Maps.newLinkedHashMap();
+      for (MultiBucketsAggregation.Bucket bucket : multiBucketsAggregation.getBuckets()) {
+        Map<String, String> parsedBuckets = parseMultiBucketsAggregationBucket(headers, bucket);
+        rows.putAll(parsedBuckets);
       }
 
-      resType = InterpreterResult.Type.TABLE;
-      resMsg = buffer.toString();
-    }
+      StringBuffer stringBuffer = new StringBuffer(StringUtils.join(headers, "\t"));
+      for (Map.Entry<String, String> row : rows.entrySet()) {
+        stringBuffer.append("\n").append(row.getKey()).append("\t").append(row.getValue());
+      }
 
+
+      resType = InterpreterResult.Type.TABLE;
+      resMsg = stringBuffer.toString();
+    }
     return new InterpreterResult(InterpreterResult.Code.SUCCESS, resType, resMsg);
   }
+
+  private Map<String, String> parseMultiBucketsAggregationBucket(
+          List<String> headers,
+          MultiBucketsAggregation.Bucket bucket) {
+    Map<String, String> rows = Maps.newLinkedHashMap();
+    if (bucket.getAggregations().asList().size() > 0) {
+      Aggregation aggregation = bucket.getAggregations().asList().get(0);
+      if (aggregation instanceof MultiBucketsAggregation) {
+        MultiBucketsAggregation multiBucketsAggregation = (MultiBucketsAggregation) aggregation;
+        if (!headers.contains(multiBucketsAggregation.getName())) {
+          headers.add(multiBucketsAggregation.getName());
+        }
+        for (MultiBucketsAggregation.Bucket b : multiBucketsAggregation.getBuckets()) {
+          Map<String, String> parsedBuckets = parseMultiBucketsAggregationBucket(headers, b);
+          for (Map.Entry<String, String> entry : parsedBuckets.entrySet()) {
+            rows.put(
+                    String.format("%s\t%s", bucket.getKeyAsString(), entry.getKey()),
+                    entry.getValue());
+          }
+        }
+      } else if (aggregation instanceof SingleBucketAggregation) {
+        Map<String, String> parsedBuckets =
+                parseSingleBucketAggregation(headers, (SingleBucketAggregation) aggregation);
+        for (Map.Entry<String, String> entry : parsedBuckets.entrySet()) {
+          String key;
+          if (headers.contains(entry.getKey())) {
+            key = bucket.getKeyAsString();
+          } else {
+            key = String.format("%s\t%s", bucket.getKeyAsString(), entry.getKey());
+          }
+          if (rows.containsKey(key)) {
+            rows.put(key, String.format("%s\t%s", rows.get(key), entry.getValue()));
+          } else {
+            rows.put(key, entry.getValue());
+          }
+        }
+      }
+    } else {
+      if (!headers.contains("doc_count")) {
+        headers.add("doc_count");
+      }
+      rows.put(bucket.getKeyAsString(), String.valueOf(bucket.getDocCount()));
+    }
+    return rows;
+  }
+
+  private Map<String, String> parseSingleBucketAggregation(
+          List<String> headers,
+          SingleBucketAggregation singleBucketAggregation) {
+    if (singleBucketAggregation.getAggregations().asList().size() > 0) {
+      Map<String, String> singleValueRows = Maps.newLinkedHashMap();
+      for (Aggregation aggregation : singleBucketAggregation.getAggregations().asList()) {
+        if (aggregation instanceof MultiBucketsAggregation) {
+          MultiBucketsAggregation multiBucketsAggregation = (MultiBucketsAggregation) aggregation;
+          if (!headers.contains(multiBucketsAggregation.getName())) {
+            headers.add(multiBucketsAggregation.getName());
+          }
+          Map<String, String> rows = Maps.newLinkedHashMap();
+          for (MultiBucketsAggregation.Bucket bucket : multiBucketsAggregation.getBuckets()) {
+            Map<String, String> parsedBuckets = parseMultiBucketsAggregationBucket(headers, bucket);
+            rows.putAll(parsedBuckets);
+          }
+          return rows;
+        } else if (aggregation instanceof SingleValue) {
+          SingleValue singleValue = (SingleValue) aggregation;
+          if (!headers.contains(singleValue.getName())) {
+            headers.add(singleValue.getName());
+          }
+          singleValueRows.put(singleValue.getName(), singleValue.getValueAsString());
+        } else if (aggregation instanceof SingleBucketAggregation) {
+          return parseSingleBucketAggregation(headers, (SingleBucketAggregation) aggregation);
+        }
+      }
+      if (!singleValueRows.isEmpty()) {
+        return singleValueRows;
+      }
+    }
+    return Collections.emptyMap();
+  }
+
 
   private String buildSearchHitsResponseMessage(SearchHit[] hits) {
 
